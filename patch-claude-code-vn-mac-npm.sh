@@ -1,10 +1,16 @@
 #!/bin/bash
 #
-# Claude Code Vietnamese IME Fix
+# Claude Code Vietnamese IME Fix - Updated for v2.1.9+
 # Fixes Vietnamese input bug in Claude Code CLI
 #
 # Bug: Claude Code processes DEL (0x7F) characters from Vietnamese IME
 #      but returns without inserting the replacement text
+#
+# Updated to work with Claude Code 2.1.9+ where variable names changed:
+#   - Offset setter: j (was _)
+#   - Cursor var: _A (was EA/FA/A)
+#   - Cleanup funcs: Oe1(),Me1() (was BB0(),GB0())
+#   - Input var: n (was s)
 #
 # Repository: https://github.com/manhit96/claude-code-vietnamese-fix
 # License: MIT
@@ -25,6 +31,7 @@ PATCH_MARKER="PHTV Vietnamese IME fix"
 echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║     Claude Code Vietnamese IME Fix - Patch Script          ║${NC}"
 echo -e "${BLUE}║     Fix lỗi gõ tiếng Việt trong Claude Code CLI            ║${NC}"
+echo -e "${BLUE}║     Updated for Claude Code 2.1.9+                         ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -105,14 +112,22 @@ apply_patch() {
     local cli_path="$1"
     local backup_path="${cli_path}.backup-$(date +%Y%m%d-%H%M%S)"
 
+    # Check if we can write to the file
+    if [[ ! -w "$cli_path" ]]; then
+        echo -e "${YELLOW}→ File cần quyền elevated permissions...${NC}"
+        USE_SUDO="sudo"
+    else
+        USE_SUDO=""
+    fi
+
     echo -e "${YELLOW}→ Đang tạo backup...${NC}"
-    cp "$cli_path" "$backup_path"
+    $USE_SUDO cp "$cli_path" "$backup_path"
     echo -e "  Backup: $backup_path"
 
     echo -e "${YELLOW}→ Đang phân tích và áp dụng patch...${NC}"
 
-    # Use Python for reliable patching
-    python3 - "$cli_path" "$backup_path" << 'PYTHON_EOF'
+    # Use Python for reliable patching - updated for v2.1.9+
+    $USE_SUDO python3 - "$cli_path" "$backup_path" << 'PYTHON_EOF'
 import sys
 import re
 
@@ -131,69 +146,135 @@ if PATCH_MARKER in content:
     print("ALREADY_PATCHED")
     sys.exit(0)
 
-# Pattern to find the buggy block in Claude Code cli.js
-# The bug: processes backspaces for DEL chars but returns without inserting replacement
-#
-# Original minified code structure:
-# if(!AA.backspace&&!AA.delete&&t.includes("\x7f")){
-#     let $A=(t.match(/\x7f/g)||[]).length,EA=j;
-#     for(let vA=0;vA<$A;vA++)EA=EA.backspace();
-#     if(!j.equals(EA)){if(j.text!==EA.text)Q(EA.text);_(EA.offset)}
-#     BB0(),GB0();return}  <-- BUG: returns without inserting text
-#
-# We insert our fix BEFORE the cleanup functions (BB0, GB0, etc) and return
-
 patched = False
-var_name = None
 
-# Find the Vietnamese IME handling block using string search (more reliable than regex)
-# Look for the pattern: offset)}FUNC(),FUNC();return}
-# Right after the backspace handling block
+# Strategy: Find the Vietnamese IME handling block by its characteristic pattern:
+# - Contains .includes("\x7f") or .includes with DEL char
+# - Has .match(/\x7f/g) pattern
+# - Has backspace() loop
+# - Ends with: OFFSET_FUNC(VAR.offset)}CLEANUP1(),CLEANUP2();return}
 
-# Search for the characteristic pattern of the bug block
-# Different Claude Code versions use different variable names (EA, FA, A, etc.)
-search_patterns = [
-    ('_(FA.offset)}', 'FA'),  # v2.1.7 Windows/newer versions
-    ('_(EA.offset)}', 'EA'),  # Older versions
-    ('_(A.offset)}', 'A'),    # Some versions
-]
+# More flexible pattern matching for different minified versions
+# Pattern: (\w+)\((\w+)\.offset\)\}(\w+)\(\),(\w+)\(\);return\}
+# Group 1: offset setter function (j, _, etc)
+# Group 2: cursor variable (_A, EA, FA, A, etc)
+# Group 3: cleanup func 1
+# Group 4: cleanup func 2
 
-for search_pat, vname in search_patterns:
-    idx = 0
-    while True:
-        idx = content.find(search_pat, idx)
-        if idx == -1:
-            break
+# Find the block containing "\x7f" handling
+del_char = '\x7f'
+search_start = 0
 
-        # Check context before this point (should have backspace loop)
-        start_ctx = max(0, idx - 500)
-        context = content[start_ctx:idx]
+while True:
+    # Find includes with DEL char
+    idx = content.find('.includes("', search_start)
+    if idx == -1:
+        idx = content.find(".includes('", search_start)
+    if idx == -1:
+        break
+
+    # Check if this includes has DEL char nearby
+    check_range = content[idx:idx+30]
+    has_del = del_char in check_range or '\\x7f' in check_range
+
+    if has_del:
+        # Found potential block, look at broader context
+        block_start = max(0, idx - 200)
+        block_end = min(len(content), idx + 500)
+        block = content[block_start:block_end]
 
         # Verify this is the Vietnamese IME block
-        if 'backspace()' in context and ('.match(/\\x7f/g)' in context or '.match(/\x7f/g)' in context):
-            # Find the return statement after this
-            end_idx = idx + len(search_pat)
+        if 'backspace()' in block and '.match(/' in block:
+            # Find the return pattern
+            # Pattern: VAR.offset)}FUNC(),FUNC();return}
+            pattern = r'(\w+)\((\w+)\.offset\)\}(\w+)\(\),(\w+)\(\);return\}'
 
-            # Look for pattern: FUNC(),FUNC();return}
-            remaining = content[end_idx:end_idx+100]
-
-            # Match: XX0(),YY0();return} or similar cleanup pattern
-            match = re.match(r'(\s*\w+\(\)\s*,\s*\w+\(\)\s*;\s*return\s*\})', remaining)
+            match = re.search(pattern, block)
             if match:
-                var_name = vname
-                # Build fix code with correct variable name
-                fix_code = PATCH_MARKER + f'let _phtv_clean=s.replace(/\\x7f/g,"");if(_phtv_clean.length>0){{for(const _c of _phtv_clean){{{var_name}={var_name}.insert(_c)}}if(!j.equals({var_name})){{if(j.text!=={var_name}.text)Q({var_name}.text);_({var_name}.offset)}}}}'
-                # Insert fix code right after _(<VAR>.offset)}
-                insert_point = end_idx
-                content = content[:insert_point] + fix_code + content[insert_point:]
-                patched = True
-                print(f"FOUND_VAR:{var_name}")
+                offset_func = match.group(1)
+                cursor_var = match.group(2)
+                cleanup1 = match.group(3)
+                cleanup2 = match.group(4)
+
+                print(f"FOUND offset_func={offset_func}, cursor_var={cursor_var}, cleanup1={cleanup1}, cleanup2={cleanup2}")
+
+                # Find the exact position in original content
+                # Search for: offset_func(cursor_var.offset)}
+                search_pattern = f'{offset_func}({cursor_var}.offset)}}'
+                insert_pos = content.find(search_pattern, idx - 200)
+
+                if insert_pos != -1:
+                    insert_pos += len(search_pattern)
+
+                    # Determine input variable name - look for .includes pattern
+                    # Usually the variable before .includes
+                    includes_match = re.search(r'(\w+)\.includes\(', block)
+                    input_var = includes_match.group(1) if includes_match else 'n'
+
+                    # Build fix code
+                    fix_code = (
+                        f'{PATCH_MARKER}'
+                        f'let _phtv_clean={input_var}.replace(/\\x7f/g,"");'
+                        f'if(_phtv_clean.length>0){{'
+                        f'for(const _c of _phtv_clean){{{cursor_var}={cursor_var}.insert(_c)}}'
+                        f'if(!P.equals({cursor_var})){{'
+                        f'if(P.text!=={cursor_var}.text)Q({cursor_var}.text);'
+                        f'{offset_func}({cursor_var}.offset)'
+                        f'}}'
+                        f'}}'
+                    )
+
+                    # Insert fix code
+                    content = content[:insert_pos] + fix_code + content[insert_pos:]
+                    patched = True
+                    break
+
+    search_start = idx + 1
+
+# Fallback: Try the old fixed patterns for backward compatibility
+if not patched:
+    # Old pattern matching for older versions
+    search_patterns = [
+        ('_(FA.offset)}', 'FA', 's'),  # v2.1.7 Windows/newer versions
+        ('_(EA.offset)}', 'EA', 's'),  # Older versions
+        ('_(A.offset)}', 'A', 's'),    # Some versions
+    ]
+
+    for search_pat, var_name, input_var in search_patterns:
+        idx = 0
+        while True:
+            idx = content.find(search_pat, idx)
+            if idx == -1:
                 break
 
-        idx += 1
+            # Check context before this point (should have backspace loop)
+            start_ctx = max(0, idx - 500)
+            context = content[start_ctx:idx]
 
-    if patched:
-        break
+            # Verify this is the Vietnamese IME block
+            if 'backspace()' in context and ('.match(/\\x7f/g)' in context or '.match(/\x7f/g)' in context):
+                # Find the return statement after this
+                end_idx = idx + len(search_pat)
+
+                # Look for pattern: FUNC(),FUNC();return}
+                remaining = content[end_idx:end_idx+100]
+
+                # Match: XX0(),YY0();return} or similar cleanup pattern
+                match = re.match(r'(\s*\w+\(\)\s*,\s*\w+\(\)\s*;\s*return\s*\})', remaining)
+                if match:
+                    # Build fix code with correct variable name
+                    fix_code = PATCH_MARKER + f'let _phtv_clean={input_var}.replace(/\\x7f/g,"");if(_phtv_clean.length>0){{for(const _c of _phtv_clean){{{var_name}={var_name}.insert(_c)}}if(!j.equals({var_name})){{if(j.text!=={var_name}.text)Q({var_name}.text);_({var_name}.offset)}}}}'
+                    # Insert fix code right after _(<VAR>.offset)}
+                    insert_point = end_idx
+                    content = content[:insert_point] + fix_code + content[insert_point:]
+                    patched = True
+                    print(f"FOUND_VAR:{var_name} (fallback)")
+                    break
+
+            idx += 1
+
+        if patched:
+            break
 
 if patched:
     with open(cli_path, 'w', encoding='utf-8') as f:
@@ -201,24 +282,18 @@ if patched:
     print("SUCCESS")
 else:
     print("PATTERN_NOT_FOUND")
+    sys.exit(1)
 PYTHON_EOF
 
     local result=$?
-    local output=$(python3 - "$cli_path" << 'CHECK_EOF'
-import sys
-if "PHTV Vietnamese IME fix" in open(sys.argv[1], encoding='utf-8').read():
-    print("PATCHED")
-else:
-    print("NOT_PATCHED")
-CHECK_EOF
-)
 
-    if [[ "$output" == "PATCHED" ]]; then
+    # Verify patch was applied
+    if grep -q "$PATCH_MARKER" "$cli_path" 2>/dev/null; then
         return 0
     else
         # Restore backup
         echo -e "${YELLOW}→ Đang khôi phục từ backup...${NC}"
-        cp "$backup_path" "$cli_path"
+        $USE_SUDO cp "$backup_path" "$cli_path"
         return 1
     fi
 }
@@ -237,9 +312,16 @@ remove_patch() {
         return 1
     fi
 
+    # Check if we need sudo
+    if [[ ! -w "$cli_path" ]]; then
+        USE_SUDO="sudo"
+    else
+        USE_SUDO=""
+    fi
+
     echo -e "${YELLOW}→ Đang khôi phục từ backup...${NC}"
-    cp "$latest_backup" "$cli_path"
-    rm -f "$latest_backup"
+    $USE_SUDO cp "$latest_backup" "$cli_path"
+    $USE_SUDO rm -f "$latest_backup"
     echo -e "${GREEN}✓ Đã khôi phục Claude Code về bản gốc.${NC}"
 }
 
@@ -311,7 +393,7 @@ main() {
                 echo -e "  Trạng thái: ${RED}✗ Chưa patch${NC}"
 
                 # Check if buggy code exists
-                if grep -q 'backspace()' "$CLI_PATH" 2>/dev/null && grep -q '\\x7f\|"\x7f"' "$CLI_PATH" 2>/dev/null; then
+                if grep -q 'backspace()' "$CLI_PATH" 2>/dev/null && grep -q $'\x7f' "$CLI_PATH" 2>/dev/null; then
                     echo -e "  Bug code:   ${YELLOW}Có tồn tại${NC} - Cần patch!"
                 else
                     echo -e "  Bug code:   ${BLUE}Không tìm thấy${NC} - Có thể đã được fix bởi Anthropic"
