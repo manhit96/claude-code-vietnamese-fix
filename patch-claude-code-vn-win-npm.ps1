@@ -199,11 +199,15 @@ function Invoke-Patch {
     }
 
     # Find the full if block containing this pattern
-    $blockStart = $content.LastIndexOf('if(', [Math]::Max(0, $idx - 150), [Math]::Min(150, $idx))
-    if ($blockStart -eq -1) {
+    # Search for 'if(' in the 150 chars before the .includes pattern
+    $searchStart = [Math]::Max(0, $idx - 150)
+    $searchRange = $content.Substring($searchStart, $idx - $searchStart)
+    $ifOffset = $searchRange.LastIndexOf('if(')
+    if ($ifOffset -eq -1) {
         Write-ColorLine "   Khong tim thay block if." $Colors.Red
         return $false
     }
+    $blockStart = $searchStart + $ifOffset
 
     # Find matching closing brace
     $depth = 0
@@ -221,43 +225,41 @@ function Invoke-Patch {
     }
 
     $fullBlock = $content.Substring($blockStart, $blockEnd - $blockStart)
-    $fullBlockEscaped = $fullBlock.Replace($DEL_CHAR, '\x7f')
+    $fullBlockEscaped = $fullBlock.Replace([string]$DEL_CHAR, '\x7f')
 
     # Extract variable names dynamically using regex
     # Pattern: let COUNT=(INPUT.match(/\x7f/g)||[]).length,STATE=CURSTATE;
+    # Note: Variable names may contain $ (e.g., $A), so use [\$\w]+ instead of \w+
     $patched = $false
 
-    if ($fullBlockEscaped -match 'let (\w+)=\(\w+\.match\(/\\x7f/g\)\|\|\[\]\)\.length,(\w+)=(\w+);') {
+    if ($fullBlockEscaped -match 'let ([\$\w]+)=\(([\$\w]+)\.match\(/\\x7f/g\)\|\|\[\]\)\.length,([\$\w]+)=([\$\w]+);') {
         $countVar = $Matches[1]
-        $stateVar = $Matches[2]
-        $curStateVar = $Matches[3]
+        $inputVar = $Matches[2]
+        $stateVar = $Matches[3]
+        $curStateVar = $Matches[4]
 
         # Extract update functions: UPDATETEXT(STATE.text);UPDATEOFFSET(STATE.offset)
-        if ($fullBlock -match "(\w+)\($stateVar\.text\);(\w+)\($stateVar\.offset\)") {
+        if ($fullBlock -match "([\$\w]+)\($stateVar\.text\);([\$\w]+)\($stateVar\.offset\)") {
             $updateTextFunc = $Matches[1]
             $updateOffsetFunc = $Matches[2]
 
-            # Extract input variable from includes check: INPUT.includes
-            if ($fullBlock -match '(\w+)\.includes\("') {
-                $inputVar = $Matches[1]
+            # Find insertion point: right after UPDATEOFFSET(STATE.offset)}
+            # Build literal string first, then escape for regex
+            $insertPattern = "$updateOffsetFunc($stateVar.offset)}"
+            $insertMatch = [regex]::Match($fullBlock, [regex]::Escape($insertPattern))
 
-                # Find insertion point: right after UPDATEOFFSET(STATE.offset)}
-                $insertPattern = "$updateOffsetFunc\($stateVar\.offset\)\}"
-                $insertMatch = [regex]::Match($fullBlock, [regex]::Escape($insertPattern))
+            if ($insertMatch.Success) {
+                # Calculate absolute position for insertion
+                $relativePos = $insertMatch.Index + $insertMatch.Length
+                $absolutePos = $blockStart + $relativePos
 
-                if ($insertMatch.Success) {
-                    # Calculate absolute position for insertion
-                    $relativePos = $insertMatch.Index + $insertMatch.Length
-                    $absolutePos = $blockStart + $relativePos
+                # Build fix code with extracted variable names
+                $fixCode = $PATCH_MARKER + "let _vn=$inputVar.replace(/\x7f/g,`"`");if(_vn.length>0){for(const _c of _vn)$stateVar=$stateVar.insert(_c);if(!$curStateVar.equals($stateVar)){if($curStateVar.text!==$stateVar.text)$updateTextFunc($stateVar.text);$updateOffsetFunc($stateVar.offset)}}"
 
-                    # Build fix code with extracted variable names
-                    $fixCode = $PATCH_MARKER + "let _vn=$inputVar.replace(/\x7f/g,`"`");if(_vn.length>0){for(const _c of _vn)$stateVar=$stateVar.insert(_c);if(!$curStateVar.equals($stateVar)){if($curStateVar.text!==$stateVar.text)$updateTextFunc($stateVar.text);$updateOffsetFunc($stateVar.offset)}}"
-
-                    # Insert fix code
-                    $content = $content.Substring(0, $absolutePos) + $fixCode + $content.Substring($absolutePos)
-                    $patched = $true
-                    Write-Host "   Tim thay: input=$inputVar, state=$stateVar, cur=$curStateVar"
-                }
+                # Insert fix code
+                $content = $content.Substring(0, $absolutePos) + $fixCode + $content.Substring($absolutePos)
+                $patched = $true
+                Write-Host "   Tim thay: input=$inputVar, state=$stateVar, cur=$curStateVar"
             }
         }
     }

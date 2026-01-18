@@ -2,7 +2,7 @@
 
 Fix lỗi gõ tiếng Việt trong Claude Code CLI với các bộ gõ OpenKey, EVKey, PHTV, Unikey... Hỗ trợ cả macOS và Windows.
 
-**Phiên bản đã test:** Claude Code v2.1.6 → v2.1.9
+**Phiên bản đã test:** Claude Code v2.1.6 → v2.1.12
 
 ## Vấn đề
 
@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/manhit96/claude-code-vietnamese-fix
 
 ### Windows
 
-> ✅ Đã test thành công trên Claude Code v2.1.9 (npm)
+> ✅ Đã test thành công trên Claude Code v2.1.12 (npm)
 
 **Yêu cầu:** Chỉ hỗ trợ bản cài qua npm. Nếu bạn cài Claude Code bằng cách khác (installer, scoop...), hãy gỡ cài đặt và cài lại qua npm:
 
